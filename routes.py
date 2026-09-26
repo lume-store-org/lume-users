@@ -342,3 +342,50 @@ def register_routes(app):
             return jsonify({"status": "ok", "database": "connected"}), 200
         except Exception as e:
             return jsonify({"status": "erro", "database": "disconnected", "detalhes": str(e)}), 500
+
+    @app.route('/usuarios/<int:id>/senha', methods=['PATCH'])
+    def atualizar_senha(id):
+        dados = request.json
+        senha_atual = dados.get('senha_atual')
+        nova_senha = dados.get('nova_senha')
+        
+        if not senha_atual or not nova_senha:
+            return jsonify({"erro": "Senha atual e nova senha são obrigatórias"}), 400
+        
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Verificar se o usuário existe
+        cur.execute('SELECT senha_hash FROM usuarios WHERE id = %s', (id,))
+        row = cur.fetchone()
+        
+        if row is None:
+            cur.close()
+            conn.close()
+            return jsonify({"erro": "Usuário não encontrado"}), 404
+        
+        senha_hash_atual = row[0]
+        senha_atual_hash = hashlib.sha256(senha_atual.encode()).hexdigest()
+        
+        # Verificar se a senha atual está correta
+        if senha_hash_atual != senha_atual_hash:
+            cur.close()
+            conn.close()
+            return jsonify({"erro": "Senha atual incorreta"}), 401
+        
+        try:
+            # Atualizar a senha
+            nova_senha_hash = hashlib.sha256(nova_senha.encode()).hexdigest()
+            cur.execute('UPDATE usuarios SET senha_hash = %s WHERE id = %s', (nova_senha_hash, id))
+            conn.commit()
+            
+            cur.close()
+            conn.close()
+            
+            return jsonify({"mensagem": "Senha atualizada com sucesso"})
+            
+        except Exception as e:
+            conn.rollback()
+            cur.close()
+            conn.close()
+            return jsonify({"erro": f"Erro ao atualizar senha: {str(e)}"}), 500
