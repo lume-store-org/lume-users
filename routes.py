@@ -1,387 +1,269 @@
-from flask import jsonify, request
-from database import get_db_connection
-from werkzeug.security import check_password_hash, generate_password_hash
-import uuid
+import secrets
 from datetime import datetime, timedelta
+
+from flask import jsonify, request
+from werkzeug.security import check_password_hash, generate_password_hash
+
+from database import get_db_connection
+
+TOKEN_TTL = timedelta(days=1)
+CAMPOS = 'id, nome, email, endereco, telefone, is_admin, data_cadastro'
+
+
+def row_to_usuario(row):
+    return {
+        'id': row[0],
+        'nome': row[1],
+        'email': row[2],
+        'endereco': row[3],
+        'telefone': row[4],
+        'is_admin': bool(row[5]),
+        'data_cadastro': row[6].isoformat() if isinstance(row[6], datetime) else row[6],
+    }
+
+
+def usuario_atual():
+    """Usuário autenticado, repassado pelo API Gateway nos headers internos."""
+    uid = request.headers.get('X-Usuario-Id')
+    return (int(uid) if uid else None), request.headers.get('X-Usuario-Admin') == '1'
+
+
+def pode_acessar(id):
+    uid, admin = usuario_atual()
+    return admin or uid == id
+
+
+def buscar_usuario(cur, id):
+    cur.execute(f'SELECT {CAMPOS} FROM usuarios WHERE id = %s', (id,))
+    row = cur.fetchone()
+    return row_to_usuario(row) if row else None
+
 
 def register_routes(app):
     @app.route('/usuarios', methods=['GET'])
     def listar_usuarios():
+        if not usuario_atual()[1]:
+            return jsonify({"erro": "Apenas administradores"}), 403
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute('SELECT id, nome, email, endereco, telefone, data_cadastro FROM usuarios')
-        rows = cur.fetchall()
-        
-        usuarios = []
-        for row in rows:
-            usuario = {
-                'id': row[0],
-                'nome': row[1],
-                'email': row[2],
-                'endereco': row[3],
-                'telefone': row[4],
-                'data_cadastro': row[5].isoformat() if isinstance(row[5], datetime) else row[5]
-            }
-            usuarios.append(usuario)
-            
+        cur.execute(f'SELECT {CAMPOS} FROM usuarios ORDER BY id')
+        usuarios = [row_to_usuario(r) for r in cur.fetchall()]
         cur.close()
         conn.close()
-        
         return jsonify({"usuarios": usuarios})
-
-    @app.route('/usuarios/<int:id>', methods=['GET'])
-    def obter_usuario(id):
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute('SELECT id, nome, email, endereco, telefone, data_cadastro FROM usuarios WHERE id = %s', (id,))
-        row = cur.fetchone()
-        
-        if row is None:
-            cur.close()
-            conn.close()
-            return jsonify({"erro": "Usuário não encontrado"}), 404
-        
-        usuario = {
-            'id': row[0],
-            'nome': row[1],
-            'email': row[2],
-            'endereco': row[3],
-            'telefone': row[4],
-            'data_cadastro': row[5].isoformat() if isinstance(row[5], datetime) else row[5]
-        }
-        
-        cur.close()
-        conn.close()
-        
-        return jsonify(usuario)
 
     @app.route('/usuarios', methods=['POST'])
     def cadastrar_usuario():
-        novo_usuario = request.json
-        nome = novo_usuario.get('nome')
-        email = novo_usuario.get('email')
-        senha = novo_usuario.get('senha')
-        endereco = novo_usuario.get('endereco', '')
-        telefone = novo_usuario.get('telefone', '')
-        
-        # Validar campos obrigatórios
+        dados = request.get_json(silent=True) or {}
+        nome = (dados.get('nome') or '').strip()
+        email = (dados.get('email') or '').strip().lower()
+        senha = dados.get('senha') or ''
+
         if not nome or not email or not senha:
             return jsonify({"erro": "Nome, email e senha são obrigatórios"}), 400
-        
-        # Hash da senha
-        senha_hash = generate_password_hash(senha)
-        
+        if len(senha) < 6:
+            return jsonify({"erro": "A senha deve ter pelo menos 6 caracteres"}), 400
+
         conn = get_db_connection()
         cur = conn.cursor()
-        
         try:
-            # Verificar se o email já existe
             cur.execute('SELECT id FROM usuarios WHERE email = %s', (email,))
-            if cur.fetchone() is not None:
-                cur.close()
-                conn.close()
-                return jsonify({"erro": "Email já cadastrado"}), 400
-            
-            # Inserir novo usuário
+            if cur.fetchone():
+                return jsonify({"erro": "Email já cadastrado"}), 409
             cur.execute(
                 'INSERT INTO usuarios (nome, email, senha_hash, endereco, telefone) VALUES (%s, %s, %s, %s, %s)',
-                (nome, email, senha_hash, endereco, telefone)
+                (nome, email, generate_password_hash(senha), dados.get('endereco', ''), dados.get('telefone', '')),
             )
-            # Obter o ID do usuário inserido usando lastrowid (método do MySQL)
-            usuario_id = cur.lastrowid
             conn.commit()
-            
-            # Obter a data de cadastro em uma consulta separada
-            cur.execute('SELECT data_cadastro FROM usuarios WHERE id = %s', (usuario_id,))
-            data_cadastro = cur.fetchone()[0]
-            
-            usuario = {
-                'id': usuario_id,
-                'nome': nome,
-                'email': email,
-                'endereco': endereco,
-                'telefone': telefone,
-                'data_cadastro': data_cadastro.isoformat() if isinstance(data_cadastro, datetime) else data_cadastro
-            }
-            
+            return jsonify(buscar_usuario(cur, cur.lastrowid)), 201
+        finally:
             cur.close()
             conn.close()
-            
-            return jsonify(usuario), 201
-            
-        except Exception as e:
-            conn.rollback()
+
+    @app.route('/usuarios/me', methods=['GET'])
+    def meu_perfil():
+        uid, _ = usuario_atual()
+        if uid is None:
+            return jsonify({"erro": "Não autenticado"}), 401
+        return obter_usuario(uid)
+
+    @app.route('/usuarios/me', methods=['PUT'])
+    def atualizar_meu_perfil():
+        uid, _ = usuario_atual()
+        if uid is None:
+            return jsonify({"erro": "Não autenticado"}), 401
+        return atualizar_usuario(uid)
+
+    @app.route('/usuarios/me/senha', methods=['PATCH'])
+    def atualizar_minha_senha():
+        uid, _ = usuario_atual()
+        if uid is None:
+            return jsonify({"erro": "Não autenticado"}), 401
+        dados = request.get_json(silent=True) or {}
+        senha_atual = dados.get('senha_atual')
+        nova_senha = dados.get('nova_senha') or ''
+        if not senha_atual or not nova_senha:
+            return jsonify({"erro": "Senha atual e nova senha são obrigatórias"}), 400
+        if len(nova_senha) < 6:
+            return jsonify({"erro": "A nova senha deve ter pelo menos 6 caracteres"}), 400
+
+        conn = get_db_connection()
+        cur = conn.cursor()
+        try:
+            cur.execute('SELECT senha_hash FROM usuarios WHERE id = %s', (uid,))
+            row = cur.fetchone()
+            if row is None or not check_password_hash(row[0], senha_atual):
+                return jsonify({"erro": "Senha atual incorreta"}), 401
+            cur.execute('UPDATE usuarios SET senha_hash = %s WHERE id = %s', (generate_password_hash(nova_senha), uid))
+            # Encerra as outras sessões
+            cur.execute('DELETE FROM tokens WHERE usuario_id = %s AND token != %s', (uid, bearer_token() or ''))
+            conn.commit()
+            return jsonify({"mensagem": "Senha atualizada com sucesso"})
+        finally:
             cur.close()
             conn.close()
-            return jsonify({"erro": f"Erro ao cadastrar usuário: {str(e)}"}), 500
+
+    @app.route('/usuarios/<int:id>', methods=['GET'])
+    def obter_usuario(id):
+        if not pode_acessar(id):
+            return jsonify({"erro": "Acesso negado"}), 403
+        conn = get_db_connection()
+        cur = conn.cursor()
+        usuario = buscar_usuario(cur, id)
+        cur.close()
+        conn.close()
+        if usuario is None:
+            return jsonify({"erro": "Usuário não encontrado"}), 404
+        return jsonify(usuario)
 
     @app.route('/usuarios/<int:id>', methods=['PUT'])
     def atualizar_usuario(id):
-        usuario_atualizado = request.json
-        nome = usuario_atualizado.get('nome')
-        email = usuario_atualizado.get('email')
-        senha = usuario_atualizado.get('senha')  # Opcional
-        endereco = usuario_atualizado.get('endereco', '')
-        telefone = usuario_atualizado.get('telefone', '')
-        
+        if not pode_acessar(id):
+            return jsonify({"erro": "Acesso negado"}), 403
+        dados = request.get_json(silent=True) or {}
+
         conn = get_db_connection()
         cur = conn.cursor()
-        
-        # Verificar se o usuário existe
-        cur.execute('SELECT id, data_cadastro FROM usuarios WHERE id = %s', (id,))
-        row = cur.fetchone()
-        
-        if row is None:
-            cur.close()
-            conn.close()
-            return jsonify({"erro": "Usuário não encontrado"}), 404
-            
-        data_cadastro = row[1]
-        
-        # Verificar se o email já está em uso por outro usuário
-        if email:
-            cur.execute('SELECT id FROM usuarios WHERE email = %s AND id != %s', (email, id))
-            if cur.fetchone() is not None:
-                cur.close()
-                conn.close()
-                return jsonify({"erro": "Email já está em uso por outro usuário"}), 400
-        
         try:
-            # Atualizar com ou sem senha
-            if senha:
-                senha_hash = generate_password_hash(senha)
-                cur.execute(
-                    'UPDATE usuarios SET nome = %s, email = %s, senha_hash = %s, endereco = %s, telefone = %s WHERE id = %s',
-                    (nome, email, senha_hash, endereco, telefone, id)
-                )
-            else:
-                cur.execute(
-                    'UPDATE usuarios SET nome = %s, email = %s, endereco = %s, telefone = %s WHERE id = %s',
-                    (nome, email, endereco, telefone, id)
-                )
-                
+            atual = buscar_usuario(cur, id)
+            if atual is None:
+                return jsonify({"erro": "Usuário não encontrado"}), 404
+
+            nome = (dados.get('nome') or atual['nome']).strip()
+            email = (dados.get('email') or atual['email']).strip().lower()
+            endereco = dados.get('endereco', atual['endereco'])
+            telefone = dados.get('telefone', atual['telefone'])
+
+            cur.execute('SELECT id FROM usuarios WHERE email = %s AND id != %s', (email, id))
+            if cur.fetchone():
+                return jsonify({"erro": "Email já está em uso por outro usuário"}), 409
+
+            cur.execute(
+                'UPDATE usuarios SET nome = %s, email = %s, endereco = %s, telefone = %s WHERE id = %s',
+                (nome, email, endereco, telefone, id),
+            )
             conn.commit()
-            
-            usuario = {
-                'id': id,
-                'nome': nome,
-                'email': email,
-                'endereco': endereco,
-                'telefone': telefone,
-                'data_cadastro': data_cadastro.isoformat() if isinstance(data_cadastro, datetime) else data_cadastro
-            }
-            
+            return jsonify(buscar_usuario(cur, id))
+        finally:
             cur.close()
             conn.close()
-            
-            return jsonify(usuario)
-            
-        except Exception as e:
-            conn.rollback()
-            cur.close()
-            conn.close()
-            return jsonify({"erro": f"Erro ao atualizar usuário: {str(e)}"}), 500
 
     @app.route('/usuarios/<int:id>', methods=['DELETE'])
     def remover_usuario(id):
+        if not pode_acessar(id):
+            return jsonify({"erro": "Acesso negado"}), 403
         conn = get_db_connection()
         cur = conn.cursor()
-        
-        # Verificar se o usuário existe
-        cur.execute('SELECT id FROM usuarios WHERE id = %s', (id,))
-        if cur.fetchone() is None:
-            cur.close()
-            conn.close()
-            return jsonify({"erro": "Usuário não encontrado"}), 404
-            
         try:
-            # Excluir o usuário (tokens serão excluídos por CASCADE)
-            cur.execute('DELETE FROM usuarios WHERE id = %s', (id,))
+            cur.execute('DELETE FROM usuarios WHERE id = %s', (id,))  # tokens saem por CASCADE
             conn.commit()
-            
-            cur.close()
-            conn.close()
-            
+            if cur.rowcount == 0:
+                return jsonify({"erro": "Usuário não encontrado"}), 404
             return jsonify({"mensagem": f"Usuário {id} removido com sucesso"})
-            
-        except Exception as e:
-            conn.rollback()
+        finally:
             cur.close()
             conn.close()
-            return jsonify({"erro": f"Erro ao remover usuário: {str(e)}"}), 500
 
     @app.route('/auth/login', methods=['POST'])
     def login():
-        credenciais = request.json
-        email = credenciais.get('email')
-        senha = credenciais.get('senha')
-        
+        dados = request.get_json(silent=True) or {}
+        email = (dados.get('email') or '').strip().lower()
+        senha = dados.get('senha') or ''
         if not email or not senha:
             return jsonify({"erro": "Email e senha são obrigatórios"}), 400
-        
+
         conn = get_db_connection()
         cur = conn.cursor()
-        
-        # Verificar credenciais
-        cur.execute('SELECT id, nome, email, senha_hash FROM usuarios WHERE email = %s', (email,))
-        row = cur.fetchone()
-        
-        if row is None or not check_password_hash(row[3], senha):
+        try:
+            cur.execute(f'SELECT {CAMPOS}, senha_hash FROM usuarios WHERE email = %s', (email,))
+            row = cur.fetchone()
+            if row is None or not check_password_hash(row[7], senha):
+                return jsonify({"erro": "Credenciais inválidas"}), 401
+
+            token = secrets.token_urlsafe(32)
+            cur.execute(
+                'INSERT INTO tokens (token, usuario_id, expiracao) VALUES (%s, %s, %s)',
+                (token, row[0], datetime.now() + TOKEN_TTL),
+            )
+            cur.execute('DELETE FROM tokens WHERE expiracao < NOW()')
+            conn.commit()
+            return jsonify({"token": token, "usuario": row_to_usuario(row)})
+        finally:
             cur.close()
             conn.close()
-            return jsonify({"erro": "Credenciais inválidas"}), 401
-        
-        # Gerar token de autenticação
-        token = str(uuid.uuid4())
-        expiracao = datetime.now() + timedelta(days=1)
-        
-        # Armazenar token
-        cur.execute(
-            'INSERT INTO tokens (token, usuario_id, expiracao) VALUES (%s, %s, %s)',
-            (token, row[0], expiracao)
-        )
-        conn.commit()
-        
-        # Montar resposta
-        response = {
-            "token": token,
-            "usuario": {
-                "id": row[0],
-                "nome": row[1],
-                "email": row[2]
-            }
-        }
-        
-        cur.close()
-        conn.close()
-        
-        return jsonify(response)
 
     @app.route('/auth/verificar', methods=['POST'])
     def verificar_token():
-        token_info = request.json
-        token = token_info.get('token')
-        
+        token = (request.get_json(silent=True) or {}).get('token') or bearer_token()
         if not token:
             return jsonify({"valido": False, "erro": "Token não fornecido"}), 400
-        
+
         conn = get_db_connection()
         cur = conn.cursor()
-        
-        # Verificar se o token existe e não expirou
-        cur.execute('''
-            SELECT t.usuario_id, t.expiracao, u.nome, u.email
-            FROM tokens t
-            JOIN usuarios u ON t.usuario_id = u.id
-            WHERE t.token = %s
-        ''', (token,))
-        
-        row = cur.fetchone()
-        
-        if row is None:
+        try:
+            cur.execute(
+                '''SELECT u.id, u.nome, u.email, u.is_admin, t.expiracao
+                   FROM tokens t JOIN usuarios u ON u.id = t.usuario_id
+                   WHERE t.token = %s''',
+                (token,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return jsonify({"valido": False, "erro": "Token inválido"}), 401
+            if datetime.now() > row[4]:
+                cur.execute('DELETE FROM tokens WHERE token = %s', (token,))
+                conn.commit()
+                return jsonify({"valido": False, "erro": "Token expirado"}), 401
+            return jsonify({
+                "valido": True,
+                "usuario": {"id": row[0], "nome": row[1], "email": row[2], "is_admin": bool(row[3])},
+            })
+        finally:
             cur.close()
             conn.close()
-            return jsonify({"valido": False, "erro": "Token inválido"}), 401
-            
-        usuario_id, expiracao, nome, email = row
-        
-        # Verificar se o token expirou
-        if datetime.now() > expiracao:
-            # Remover token expirado
-            cur.execute('DELETE FROM tokens WHERE token = %s', (token,))
-            conn.commit()
-            
-            cur.close()
-            conn.close()
-            return jsonify({"valido": False, "erro": "Token expirado"}), 401
-            
-        # Token válido
-        response = {
-            "valido": True,
-            "usuario": {
-                "id": usuario_id,
-                "nome": nome,
-                "email": email
-            }
-        }
-        
-        cur.close()
-        conn.close()
-        
-        return jsonify(response)
 
     @app.route('/auth/logout', methods=['POST'])
     def logout():
-        token_info = request.json
-        token = token_info.get('token')
-        
-        if not token:
-            return jsonify({"mensagem": "Logout realizado com sucesso"})
-        
-        conn = get_db_connection()
-        cur = conn.cursor()
-        
-        # Remover o token
-        cur.execute('DELETE FROM tokens WHERE token = %s', (token,))
-        conn.commit()
-        
-        cur.close()
-        conn.close()
-        
+        token = (request.get_json(silent=True) or {}).get('token') or bearer_token()
+        if token:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute('DELETE FROM tokens WHERE token = %s', (token,))
+            conn.commit()
+            cur.close()
+            conn.close()
         return jsonify({"mensagem": "Logout realizado com sucesso"})
 
     @app.route('/health', methods=['GET'])
     def health():
         try:
             conn = get_db_connection()
-            cur = conn.cursor()
-            cur.execute('SELECT 1')
-            cur.close()
             conn.close()
             return jsonify({"status": "ok", "database": "connected"}), 200
-        except Exception as e:
-            return jsonify({"status": "erro", "database": "disconnected", "detalhes": str(e)}), 500
+        except Exception:
+            return jsonify({"status": "erro", "database": "disconnected"}), 500
 
-    @app.route('/usuarios/<int:id>/senha', methods=['PATCH'])
-    def atualizar_senha(id):
-        dados = request.json
-        senha_atual = dados.get('senha_atual')
-        nova_senha = dados.get('nova_senha')
-        
-        if not senha_atual or not nova_senha:
-            return jsonify({"erro": "Senha atual e nova senha são obrigatórias"}), 400
-        
-        conn = get_db_connection()
-        cur = conn.cursor()
-        
-        # Verificar se o usuário existe
-        cur.execute('SELECT senha_hash FROM usuarios WHERE id = %s', (id,))
-        row = cur.fetchone()
-        
-        if row is None:
-            cur.close()
-            conn.close()
-            return jsonify({"erro": "Usuário não encontrado"}), 404
-        
-        # Verificar se a senha atual está correta
-        if not check_password_hash(row[0], senha_atual):
-            cur.close()
-            conn.close()
-            return jsonify({"erro": "Senha atual incorreta"}), 401
-        
-        try:
-            # Atualizar a senha
-            nova_senha_hash = generate_password_hash(nova_senha)
-            cur.execute('UPDATE usuarios SET senha_hash = %s WHERE id = %s', (nova_senha_hash, id))
-            conn.commit()
-            
-            cur.close()
-            conn.close()
-            
-            return jsonify({"mensagem": "Senha atualizada com sucesso"})
-            
-        except Exception as e:
-            conn.rollback()
-            cur.close()
-            conn.close()
-            return jsonify({"erro": f"Erro ao atualizar senha: {str(e)}"}), 500
+
+def bearer_token():
+    auth = request.headers.get('Authorization', '')
+    return auth[7:] if auth.startswith('Bearer ') else None
