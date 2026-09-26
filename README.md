@@ -1,5 +1,8 @@
 <p align="center">
-  <img src="docs/logo.svg" alt="Lume Store" width="240" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/logo-dark.svg" />
+    <img src="docs/logo.svg" alt="Lume Store" width="240" />
+  </picture>
 </p>
 
 <h1 align="center">
@@ -7,7 +10,7 @@
 </h1>
 
 <p align="center">
-  <img src="docs/arch.gif" alt="Arquitetura da Lume Store com o microserviço de usuários" />
+  <img src="docs/api-demo.gif" alt="Rotas de usuários no Swagger: cadastro, login e perfil" />
 </p>
 
 <p align="center">
@@ -21,6 +24,12 @@
 Microserviço de **usuários** da Lume Store: cadastro, login, sessões e perfil. É ele que emite e valida os tokens de sessão usados pelo [lume-gateway](https://github.com/lume-store-org/lume-gateway) para autenticar todas as chamadas da loja, e que define quem é administrador.
 
 Tem o próprio banco MySQL (`users_db`).
+
+## Arquitetura
+
+<p align="center">
+  <img src="docs/arch.gif" alt="Arquitetura do lume-users: chamado pelo gateway para cadastro, login e validação de token, com o banco users_db" />
+</p>
 
 ## O que foi construído
 
