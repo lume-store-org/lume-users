@@ -1,27 +1,27 @@
 SET NAMES utf8mb4;
 
-CREATE TABLE IF NOT EXISTS usuarios (
+CREATE TABLE IF NOT EXISTS users (
     id INT AUTO_INCREMENT PRIMARY KEY,
-    nome VARCHAR(100) NOT NULL,
+    name VARCHAR(100) NOT NULL,
     email VARCHAR(100) NOT NULL UNIQUE,
-    senha_hash VARCHAR(255) NOT NULL,
-    endereco TEXT,
-    telefone VARCHAR(20),
+    password_hash VARCHAR(255) NOT NULL,
+    address TEXT,
+    phone VARCHAR(20),
     is_admin BOOLEAN NOT NULL DEFAULT FALSE,
-    data_cadastro TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
-CREATE TABLE IF NOT EXISTS tokens (
+CREATE TABLE IF NOT EXISTS sessions (
     token VARCHAR(100) PRIMARY KEY,
-    usuario_id INT NOT NULL,
-    expiracao TIMESTAMP NOT NULL,
-    FOREIGN KEY (usuario_id) REFERENCES usuarios(id) ON DELETE CASCADE
+    user_id INT NOT NULL,
+    expires_at TIMESTAMP NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
--- Contas de teste (dados fictícios). Hashes scrypt com salt, gerados pelo werkzeug.
---   admin@lumestore.dev   / admin123  (administrador: gerencia o catálogo e todos os pedidos)
---   cliente@lumestore.dev / senha123  (cliente)
-INSERT INTO usuarios (id, nome, email, senha_hash, endereco, telefone, is_admin, data_cadastro) VALUES
+-- Test accounts (fictitious data). Salted scrypt hashes generated with werkzeug.
+--   admin@lumestore.dev   / admin123  (administrator: manages the catalog and every order)
+--   cliente@lumestore.dev / senha123  (customer)
+INSERT INTO users (id, name, email, password_hash, address, phone, is_admin, created_at) VALUES
     (1, 'Admin Lume', 'admin@lumestore.dev',
      'scrypt:32768:8:1$hbMh7bNk1AW6ByOk$87934d8ab2ed3bd34179111ac3b150d30af34242cbb0420dd199f5b8fe9f14c38f208a4b9bd9bb1aa57833a599b298e4811424d65a357e98938cb3999201c670',
      'Av. Exemplo, 1000 - São Paulo/SP', '(11) 90000-0000', TRUE, '2025-04-01 09:00:00'),
