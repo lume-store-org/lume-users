@@ -1,6 +1,6 @@
 from flask import jsonify, request
 from database import get_db_connection
-import hashlib
+from werkzeug.security import check_password_hash, generate_password_hash
 import uuid
 from datetime import datetime, timedelta
 
@@ -69,7 +69,7 @@ def register_routes(app):
             return jsonify({"erro": "Nome, email e senha são obrigatórios"}), 400
         
         # Hash da senha
-        senha_hash = hashlib.sha256(senha.encode()).hexdigest()
+        senha_hash = generate_password_hash(senha)
         
         conn = get_db_connection()
         cur = conn.cursor()
@@ -149,7 +149,7 @@ def register_routes(app):
         try:
             # Atualizar com ou sem senha
             if senha:
-                senha_hash = hashlib.sha256(senha.encode()).hexdigest()
+                senha_hash = generate_password_hash(senha)
                 cur.execute(
                     'UPDATE usuarios SET nome = %s, email = %s, senha_hash = %s, endereco = %s, telefone = %s WHERE id = %s',
                     (nome, email, senha_hash, endereco, telefone, id)
@@ -223,11 +223,10 @@ def register_routes(app):
         cur = conn.cursor()
         
         # Verificar credenciais
-        senha_hash = hashlib.sha256(senha.encode()).hexdigest()
-        cur.execute('SELECT id, nome, email FROM usuarios WHERE email = %s AND senha_hash = %s', (email, senha_hash))
+        cur.execute('SELECT id, nome, email, senha_hash FROM usuarios WHERE email = %s', (email,))
         row = cur.fetchone()
         
-        if row is None:
+        if row is None or not check_password_hash(row[3], senha):
             cur.close()
             conn.close()
             return jsonify({"erro": "Credenciais inválidas"}), 401
@@ -364,18 +363,15 @@ def register_routes(app):
             conn.close()
             return jsonify({"erro": "Usuário não encontrado"}), 404
         
-        senha_hash_atual = row[0]
-        senha_atual_hash = hashlib.sha256(senha_atual.encode()).hexdigest()
-        
         # Verificar se a senha atual está correta
-        if senha_hash_atual != senha_atual_hash:
+        if not check_password_hash(row[0], senha_atual):
             cur.close()
             conn.close()
             return jsonify({"erro": "Senha atual incorreta"}), 401
         
         try:
             # Atualizar a senha
-            nova_senha_hash = hashlib.sha256(nova_senha.encode()).hexdigest()
+            nova_senha_hash = generate_password_hash(nova_senha)
             cur.execute('UPDATE usuarios SET senha_hash = %s WHERE id = %s', (nova_senha_hash, id))
             conn.commit()
             
